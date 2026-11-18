@@ -1,7 +1,0 @@
-.pio/
-.vscode/
-build/
-sdkconfig
-sdkconfig.*
-!sdkconfig.defaults
-.DS_Store
