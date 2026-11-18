@@ -8,12 +8,12 @@
 #define MIC_SCK  2
 #define MIC_WS   41
 
-#define TFT_SCL  4
-#define TFT_SDA  5
-#define TFT_RST  6
-#define TFT_DC   7
-#define TFT_CS   15
-#define TFT_BL   16
+#define TFT_SCL  16
+#define TFT_SDA  15
+#define TFT_RST  7
+#define TFT_DC   6
+#define TFT_CS   5
+#define TFT_BL   4
 
 const int MOTOR_PINS[4] = {10, 11, 12, 13};
 
