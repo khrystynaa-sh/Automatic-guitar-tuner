@@ -472,6 +472,7 @@ void calibrateNoise() {
 void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);   // never stall the program if no one is reading serial
+  rgbLedWrite(RGB_BUILTIN, 0, 0, 0);   // turn off the onboard RGB LED (GPIO48) and keep its pin driven, so motor noise can't light it
   motorInit();
   displayInit();
   buttonsInit();
