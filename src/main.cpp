@@ -37,10 +37,15 @@ const uint32_t SETTLE_MS       = 60;    // extra wait after the motor stops
 const int   MAX_ITER           = 30;
 const long  MAX_TOTAL_STEPS    = 10L * STEPS_PER_REV;
 const float MAX_CORRECT_CENTS  = 700;   // further off than this: don't trust it, don't move
+// Other sounds (voice, another string) must not turn the peg. A string under
+// the motor only drifts slightly, or shifts by about the last move.
+const float JUMP_CENTS         = 30;    // allowed difference from the expected pitch
+const int   OTHER_SOUND_FRAMES = 40;    // ~2 s of other sound in a row -> stop
 const uint32_t REPLUCK_TIMEOUT_MS = 10000;
 
 // ---------- Battery (INA219) ----------
 const uint32_t BATTERY_INTERVAL_MS = 2000;
+const uint32_t BATTERY_RECOVER_MS  = 5000;  // ignore voltage for this long after the motor stops
 const float    BATT_WARN_V  = 3.60f;   // show the battery line in yellow
 const float    BATT_LOW_V   = 3.40f;   // below this the motor is blocked
 const float    BATT_OK_V    = 3.50f;   // motor allowed again above this
@@ -117,6 +122,11 @@ float readings[READINGS_PER_CHECK];
 int   nReadings = 0, inTuneChecks = 0, iterations = 0;
 long  totalSteps = 0;
 
+float refCents = 0;      // last trusted pitch of the locked string
+bool  haveRef = false;
+float allowance = 0;     // extra room right after a motor move
+int   rejectStreak = 0;  // readings in a row that didn't fit
+
 const char* doneMsg = "";
 uint16_t    doneColor = COL_GREEN;
 
@@ -134,27 +144,31 @@ void updateBattery(bool force) {
   if (!force && millis() - lastBattery < BATTERY_INTERVAL_MS) return;
   lastBattery = millis();
 
+  // The motor makes the battery voltage dip; it needs a few seconds to recover.
+  bool underLoad = motorBusy() || millis() - motorStoppedAt() < BATTERY_RECOVER_MS;
   BatteryInfo b;
-  if (!batteryRead(b)) return;
+  if (!batteryRead(b, underLoad)) return;
 
-  char buf[40];
-  uint16_t color = COL_GREY;
   if (!b.onBattery) {
     batteryLow = false;
-    snprintf(buf, sizeof(buf), "No battery (USB power)");
+    displayBattery(-1, COL_GREY, false);
+  } else if (b.charging) {
+    batteryLow = false;
+    displayBattery(100, COL_GREEN, true);
   } else {
     // Voltage sags while the motor runs, so only judge it when idle.
     if (!motorBusy()) {
-      if (b.volts < BATT_LOW_V)     batteryLow = true;
-      else if (b.volts > BATT_OK_V) batteryLow = false;
+      if (b.restVolts < BATT_LOW_V)     batteryLow = true;
+      else if (b.restVolts > BATT_OK_V) batteryLow = false;
     }
-    snprintf(buf, sizeof(buf), "Battery %.2fV  %d%%  %.0fmA", b.volts, b.percent, b.mA);
-    if (batteryLow)                  color = COL_RED;
-    else if (b.volts < BATT_WARN_V)  color = COL_YELLOW;
+    uint16_t color = COL_GREEN;
+    if (batteryLow)                      color = COL_RED;
+    else if (b.restVolts < BATT_WARN_V)  color = COL_YELLOW;
+    displayBattery(b.percent, color, false);
   }
-  displayBattery(buf, color);
-  if (DEBUG) Serial.printf("Battery: %.3f V  %.1f mA  %d%%%s\n",
-                           b.volts, b.mA, b.percent, batteryLow ? "  LOW" : "");
+  if (DEBUG) Serial.printf("Battery: %.3f V (rest %.3f V)  %.1f mA  %d%%%s%s\n",
+                           b.volts, b.restVolts, b.mA, b.percent,
+                           b.charging ? "  CHARGER" : "", batteryLow ? "  LOW" : "");
 }
 
 // ---------- Screens ----------
@@ -184,6 +198,7 @@ void resetSession() {
   relockCand = -1; relockCount = 0;
   quietCount = 0; silentSince = 0;
   nReadings = 0; inTuneChecks = 0; iterations = 0; totalSteps = 0;
+  haveRef = false; allowance = 0; rejectStreak = 0;
   haveSmooth = false;
   showIdleScreen();
 }
@@ -193,6 +208,7 @@ void lockTarget(int idx) {
   phase = LOCKED;
   relockCand = -1; relockCount = 0;
   nReadings = 0; inTuneChecks = 0; iterations = 0; totalSteps = 0;
+  haveRef = false; allowance = 0; rejectStreak = 0;
   haveSmooth = false;
   lastDraw = 0;
   const Note& n = tuning().notes[idx];
@@ -345,6 +361,8 @@ void tuningStep(float cents) {
   nReadings = 0;
 
   float m = median(readings, READINGS_PER_CHECK);
+  refCents = m;        // trusted pitch for the next readings
+  allowance = 0;
   if (fabsf(m) < IN_TUNE_CENTS) {
     if (++inTuneChecks >= IN_TUNE_CHECKS) finish("TUNED!", COL_GREEN);
     return;
@@ -363,6 +381,9 @@ void tuningStep(float cents) {
   int steps = constrain((int)(fabsf(m) * STEPS_PER_CENT), MIN_STEPS, MAX_STEPS);
   int dir = (m < 0 ? 1 : -1) * MOTOR_DIR;   // flat -> tighten, sharp -> loosen
   motorMove(dir * steps);
+  // After the move the pitch should shift by about steps / STEPS_PER_CENT.
+  // Allow twice that, so STEPS_PER_CENT doesn't have to be exact.
+  allowance = 2.0f * steps / STEPS_PER_CENT;
   iterations++;
   totalSteps += steps;
   phase = SETTLE;
@@ -371,6 +392,24 @@ void tuningStep(float cents) {
   snprintf(buf, sizeof(buf), "MOTOR %+d", dir * steps);
   displayStatus(buf, COL_CYAN);
   Serial.printf("  move %d: %+.1f c -> %+d steps\n", iterations, m, dir * steps);
+}
+
+// Is this reading the string we are tuning, or some other sound?
+bool plausible(float cents) {
+  if (!haveRef) {            // first reading after locking is the reference
+    refCents = cents;
+    haveRef = true;
+    return true;
+  }
+  return fabsf(cents - refCents) <= JUMP_CENTS + allowance;
+}
+
+void rejectReading(float f, float cents) {
+  if (++rejectStreak == 1) {
+    displayStatus("Other sound?", COL_YELLOW);
+    Serial.printf("  ignored %.1f Hz (%+.0f c, expected ~%+.0f c)\n", f, cents, refCents);
+  }
+  if (rejectStreak >= OTHER_SOUND_FRAMES) finish("Other sound", COL_YELLOW);
 }
 
 void handleQuiet() {
@@ -437,6 +476,14 @@ void processFrame(const AudioFrame& fr) {
     }
 
     float cents = 1200.0f * log2f(f / noteFreq(tuning().notes[target]));
+
+    // While the motor is tuning, a sudden jump is another sound (e.g. a
+    // voice), not the string: don't show it and don't turn the peg for it.
+    if (cfg.motorOn && phase == LOCKED) {
+      if (!plausible(cents)) { rejectReading(f, cents); return; }
+      rejectStreak = 0;
+    }
+
     if (!haveSmooth) { smoothCents = cents; smoothF = f; haveSmooth = true; }
     else {
       smoothCents += SMOOTH * (cents - smoothCents);
@@ -472,6 +519,7 @@ void calibrateNoise() {
 void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);   // never stall the program if no one is reading serial
+  rgbLedWrite(RGB_BUILTIN, 0, 0, 0);   // turn off the onboard RGB LED (GPIO48) and keep its pin driven, so motor noise can't light it
   motorInit();
   displayInit();
   buttonsInit();
