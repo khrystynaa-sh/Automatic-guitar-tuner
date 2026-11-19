@@ -109,9 +109,34 @@ void displayIdle(const char* status) {
   displayStatus(status, COL_WHITE);
 }
 
-void displayBattery(const char* text, uint16_t color) {
-  tft.fillRect(0, 232, 240, 8, COL_BLACK);
-  centerText(text, 232, 1, color);
+void displayBattery(int percent, uint16_t color, bool charging) {
+  const int y = 232;            // bottom 8 pixel rows of the screen
+  tft.fillRect(0, y, 240, 8, COL_BLACK);
+  if (percent < 0) { centerText("USB", y, 1, COL_GREY); return; }
+
+  char txt[8];
+  snprintf(txt, sizeof(txt), "%d%%", constrain(percent, 0, 100));
+  const int iconW = 20, gap = 4;
+  int textW = charging ? 7 : (int)strlen(txt) * 6;
+  int x = 120 - (iconW + gap + textW) / 2;
+
+  // Battery outline with a small terminal nub on the right.
+  tft.drawRect(x, y, 18, 8, COL_WHITE);
+  tft.fillRect(x + 18, y + 2, 2, 4, COL_WHITE);
+  int fill = constrain(percent, 0, 100) * 14 / 100;
+  if (fill > 0) tft.fillRect(x + 2, y + 2, fill, 4, color);
+
+  int tx = x + iconW + gap;
+  if (charging) {
+    // Lightning bolt made of two triangles.
+    tft.fillTriangle(tx + 5, y,     tx + 1, y + 4, tx + 4, y + 4, color);
+    tft.fillTriangle(tx + 3, y + 3, tx + 6, y + 3, tx + 2, y + 7, color);
+  } else {
+    tft.setTextSize(1);
+    tft.setTextColor(color);
+    tft.setCursor(tx, y);
+    tft.print(txt);
+  }
 }
 
 void displayMenuOpen() {

@@ -29,8 +29,9 @@ void displayStatus(const char* text, uint16_t color);
 // Empty scale (no needle) and a status message.
 void displayIdle(const char* status);
 
-// Small battery line at the very bottom of the screen.
-void displayBattery(const char* text, uint16_t color);
+// Small battery icon at the very bottom: fill level + "81%", or a lightning
+// bolt while charging. percent < 0 shows "USB" (no battery).
+void displayBattery(int percent, uint16_t color, bool charging);
 
 // Settings menu: call Open once, then Rows whenever something changes.
 void displayMenuOpen();
